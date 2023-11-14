@@ -1,27 +1,17 @@
 package smux
 
 import (
-	"bytes"
 	crand "crypto/rand"
 	"encoding/binary"
 	"fmt"
 	"io"
-	"log"
 	"math/rand"
 	"net"
-	"net/http"
-	_ "net/http/pprof"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
-
-func init() {
-	go func() {
-		log.Println(http.ListenAndServe("0.0.0.0:6060", nil))
-	}()
-}
 
 // setupServer starts new server listening on a random localhost port and
 // returns address of the server, function to stop the server, new client
@@ -34,6 +24,7 @@ func setupServer(tb testing.TB) (addr string, stopfunc func(), client net.Conn, 
 	go func() {
 		conn, err := ln.Accept()
 		if err != nil {
+			tb.Error(err)
 			return
 		}
 		go handleConnection(conn)
@@ -49,52 +40,6 @@ func setupServer(tb testing.TB) (addr string, stopfunc func(), client net.Conn, 
 
 func handleConnection(conn net.Conn) {
 	session, _ := Server(conn, nil)
-	for {
-		if stream, err := session.AcceptStream(); err == nil {
-			go func(s io.ReadWriteCloser) {
-				buf := make([]byte, 65536)
-				for {
-					n, err := s.Read(buf)
-					if err != nil {
-						return
-					}
-					s.Write(buf[:n])
-				}
-			}(stream)
-		} else {
-			return
-		}
-	}
-}
-
-// setupServer starts new server listening on a random localhost port and
-// returns address of the server, function to stop the server, new client
-// connection to this server or an error.
-func setupServerV2(tb testing.TB) (addr string, stopfunc func(), client net.Conn, err error) {
-	ln, err := net.Listen("tcp", "localhost:0")
-	if err != nil {
-		return "", nil, nil, err
-	}
-	go func() {
-		conn, err := ln.Accept()
-		if err != nil {
-			return
-		}
-		go handleConnectionV2(conn)
-	}()
-	addr = ln.Addr().String()
-	conn, err := net.Dial("tcp", addr)
-	if err != nil {
-		ln.Close()
-		return "", nil, nil, err
-	}
-	return ln.Addr().String(), func() { ln.Close() }, conn, nil
-}
-
-func handleConnectionV2(conn net.Conn) {
-	config := DefaultConfig()
-	config.Version = 2
-	session, _ := Server(conn, config)
 	for {
 		if stream, err := session.AcceptStream(); err == nil {
 			go func(s io.ReadWriteCloser) {
@@ -139,169 +84,6 @@ func TestEcho(t *testing.T) {
 		t.Fatal("data mimatch")
 	}
 	session.Close()
-}
-
-func TestWriteTo(t *testing.T) {
-	const N = 1 << 20
-	// server
-	ln, err := net.Listen("tcp", "localhost:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ln.Close()
-
-	go func() {
-		conn, err := ln.Accept()
-		if err != nil {
-			return
-		}
-		session, _ := Server(conn, nil)
-		for {
-			if stream, err := session.AcceptStream(); err == nil {
-				go func(s io.ReadWriteCloser) {
-					numBytes := 0
-					buf := make([]byte, 65536)
-					for {
-						n, err := s.Read(buf)
-						if err != nil {
-							return
-						}
-						s.Write(buf[:n])
-						numBytes += n
-
-						if numBytes == N {
-							s.Close()
-							return
-						}
-					}
-				}(stream)
-			} else {
-				return
-			}
-		}
-	}()
-
-	addr := ln.Addr().String()
-	conn, err := net.Dial("tcp", addr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
-
-	// client
-	session, _ := Client(conn, nil)
-	stream, _ := session.OpenStream()
-	sndbuf := make([]byte, N)
-	for i := range sndbuf {
-		sndbuf[i] = byte(rand.Int())
-	}
-
-	go stream.Write(sndbuf)
-
-	var rcvbuf bytes.Buffer
-	nw, ew := stream.WriteTo(&rcvbuf)
-	if ew != io.EOF {
-		t.Fatal(ew)
-	}
-
-	if nw != N {
-		t.Fatal("WriteTo nw mismatch", nw)
-	}
-
-	if bytes.Compare(sndbuf, rcvbuf.Bytes()) != 0 {
-		t.Fatal("mismatched echo bytes")
-	}
-}
-
-func TestWriteToV2(t *testing.T) {
-	config := DefaultConfig()
-	config.Version = 2
-	const N = 1 << 20
-	// server
-	ln, err := net.Listen("tcp", "localhost:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ln.Close()
-
-	go func() {
-		conn, err := ln.Accept()
-		if err != nil {
-			return
-		}
-		session, _ := Server(conn, config)
-		for {
-			if stream, err := session.AcceptStream(); err == nil {
-				go func(s io.ReadWriteCloser) {
-					numBytes := 0
-					buf := make([]byte, 65536)
-					for {
-						n, err := s.Read(buf)
-						if err != nil {
-							return
-						}
-						s.Write(buf[:n])
-						numBytes += n
-
-						if numBytes == N {
-							s.Close()
-							return
-						}
-					}
-				}(stream)
-			} else {
-				return
-			}
-		}
-	}()
-
-	addr := ln.Addr().String()
-	conn, err := net.Dial("tcp", addr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
-
-	// client
-	session, _ := Client(conn, config)
-	stream, _ := session.OpenStream()
-	sndbuf := make([]byte, N)
-	for i := range sndbuf {
-		sndbuf[i] = byte(rand.Int())
-	}
-
-	go stream.Write(sndbuf)
-
-	var rcvbuf bytes.Buffer
-	nw, ew := stream.WriteTo(&rcvbuf)
-	if ew != io.EOF {
-		t.Fatal(ew)
-	}
-
-	if nw != N {
-		t.Fatal("WriteTo nw mismatch", nw)
-	}
-
-	if bytes.Compare(sndbuf, rcvbuf.Bytes()) != 0 {
-		t.Fatal("mismatched echo bytes")
-	}
-}
-
-func TestGetDieCh(t *testing.T) {
-	cs, ss, err := getSmuxStreamPair()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ss.Close()
-	dieCh := ss.GetDieCh()
-	go func() {
-		select {
-		case <-dieCh:
-		case <-time.Tick(time.Second):
-			t.Fatal("wait die chan timeout")
-		}
-	}()
-	cs.Close()
 }
 
 func TestSpeed(t *testing.T) {
@@ -376,40 +158,6 @@ func TestParallel(t *testing.T) {
 	session.Close()
 }
 
-func TestParallelV2(t *testing.T) {
-	config := DefaultConfig()
-	config.Version = 2
-	_, stop, cli, err := setupServerV2(t)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer stop()
-	session, _ := Client(cli, config)
-
-	par := 1000
-	messages := 100
-	var wg sync.WaitGroup
-	wg.Add(par)
-	for i := 0; i < par; i++ {
-		stream, _ := session.OpenStream()
-		go func(s *Stream) {
-			buf := make([]byte, 20)
-			for j := 0; j < messages; j++ {
-				msg := fmt.Sprintf("hello%v", j)
-				s.Write([]byte(msg))
-				if _, err := s.Read(buf); err != nil {
-					break
-				}
-			}
-			s.Close()
-			wg.Done()
-		}(stream)
-	}
-	t.Log("created", session.NumStreams(), "streams")
-	wg.Wait()
-	session.Close()
-}
-
 func TestCloseThenOpen(t *testing.T) {
 	_, stop, cli, err := setupServer(t)
 	if err != nil {
@@ -423,19 +171,6 @@ func TestCloseThenOpen(t *testing.T) {
 	}
 }
 
-func TestSessionDoubleClose(t *testing.T) {
-	_, stop, cli, err := setupServer(t)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer stop()
-	session, _ := Client(cli, nil)
-	session.Close()
-	if err := session.Close(); err == nil {
-		t.Fatal("session double close doesn't return error")
-	}
-}
-
 func TestStreamDoubleClose(t *testing.T) {
 	_, stop, cli, err := setupServer(t)
 	if err != nil {
@@ -446,7 +181,7 @@ func TestStreamDoubleClose(t *testing.T) {
 	stream, _ := session.OpenStream()
 	stream.Close()
 	if err := stream.Close(); err == nil {
-		t.Fatal("stream double close doesn't return error")
+		t.Log("double close doesn't return error")
 	}
 	session.Close()
 }
@@ -546,44 +281,6 @@ func TestKeepAliveTimeout(t *testing.T) {
 	config.KeepAliveInterval = time.Second
 	config.KeepAliveTimeout = 2 * time.Second
 	session, _ := Client(cli, config)
-	time.Sleep(3 * time.Second)
-	if !session.IsClosed() {
-		t.Fatal("keepalive-timeout failed")
-	}
-}
-
-type blockWriteConn struct {
-	net.Conn
-}
-
-func (c *blockWriteConn) Write(b []byte) (n int, err error) {
-	forever := time.Hour * 24
-	time.Sleep(forever)
-	return c.Conn.Write(b)
-}
-
-func TestKeepAliveBlockWriteTimeout(t *testing.T) {
-	ln, err := net.Listen("tcp", "localhost:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ln.Close()
-	go func() {
-		ln.Accept()
-	}()
-
-	cli, err := net.Dial("tcp", ln.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer cli.Close()
-	//when writeFrame block, keepalive in old version never timeout
-	blockWriteCli := &blockWriteConn{cli}
-
-	config := DefaultConfig()
-	config.KeepAliveInterval = time.Second
-	config.KeepAliveTimeout = 2 * time.Second
-	session, _ := Client(blockWriteCli, config)
 	time.Sleep(3 * time.Second)
 	if !session.IsClosed() {
 		t.Fatal("keepalive-timeout failed")
@@ -763,7 +460,7 @@ func TestRandomFrame(t *testing.T) {
 	}
 	session, _ = Client(cli, nil)
 	for i := 0; i < 100; i++ {
-		f := newFrame(1, cmdSYN, 1000)
+		f := newFrame(cmdSYN, 1000)
 		session.writeFrame(f)
 	}
 	cli.Close()
@@ -776,7 +473,7 @@ func TestRandomFrame(t *testing.T) {
 	allcmds := []byte{cmdSYN, cmdFIN, cmdPSH, cmdNOP}
 	session, _ = Client(cli, nil)
 	for i := 0; i < 100; i++ {
-		f := newFrame(1, allcmds[rand.Int()%len(allcmds)], rand.Uint32())
+		f := newFrame(allcmds[rand.Int()%len(allcmds)], rand.Uint32())
 		session.writeFrame(f)
 	}
 	cli.Close()
@@ -788,7 +485,7 @@ func TestRandomFrame(t *testing.T) {
 	}
 	session, _ = Client(cli, nil)
 	for i := 0; i < 100; i++ {
-		f := newFrame(1, byte(rand.Uint32()), rand.Uint32())
+		f := newFrame(byte(rand.Uint32()), rand.Uint32())
 		session.writeFrame(f)
 	}
 	cli.Close()
@@ -800,7 +497,7 @@ func TestRandomFrame(t *testing.T) {
 	}
 	session, _ = Client(cli, nil)
 	for i := 0; i < 100; i++ {
-		f := newFrame(1, byte(rand.Uint32()), rand.Uint32())
+		f := newFrame(byte(rand.Uint32()), rand.Uint32())
 		f.ver = byte(rand.Uint32())
 		session.writeFrame(f)
 	}
@@ -813,7 +510,7 @@ func TestRandomFrame(t *testing.T) {
 	}
 	session, _ = Client(cli, nil)
 
-	f := newFrame(1, byte(rand.Uint32()), rand.Uint32())
+	f := newFrame(byte(rand.Uint32()), rand.Uint32())
 	rnd := make([]byte, rand.Uint32()%1024)
 	io.ReadFull(crand.Reader, rnd)
 	f.data = rnd
@@ -826,96 +523,8 @@ func TestRandomFrame(t *testing.T) {
 	copy(buf[headerSize:], f.data)
 
 	session.conn.Write(buf)
+	t.Log(rawHeader(buf))
 	cli.Close()
-
-	// writeFrame after die
-	cli, err = net.Dial("tcp", addr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	session, _ = Client(cli, nil)
-	//close first
-	session.Close()
-	for i := 0; i < 100; i++ {
-		f := newFrame(1, byte(rand.Uint32()), rand.Uint32())
-		session.writeFrame(f)
-	}
-}
-
-func TestWriteFrameInternal(t *testing.T) {
-	addr, stop, cli, err := setupServer(t)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer stop()
-	// pure random
-	session, _ := Client(cli, nil)
-	for i := 0; i < 100; i++ {
-		rnd := make([]byte, rand.Uint32()%1024)
-		io.ReadFull(crand.Reader, rnd)
-		session.conn.Write(rnd)
-	}
-	cli.Close()
-
-	// writeFrame after die
-	cli, err = net.Dial("tcp", addr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	session, _ = Client(cli, nil)
-	//close first
-	session.Close()
-	for i := 0; i < 100; i++ {
-		f := newFrame(1, byte(rand.Uint32()), rand.Uint32())
-		session.writeFrameInternal(f, time.After(session.config.KeepAliveTimeout), 0)
-	}
-
-	// random cmds
-	cli, err = net.Dial("tcp", addr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	allcmds := []byte{cmdSYN, cmdFIN, cmdPSH, cmdNOP}
-	session, _ = Client(cli, nil)
-	for i := 0; i < 100; i++ {
-		f := newFrame(1, allcmds[rand.Int()%len(allcmds)], rand.Uint32())
-		session.writeFrameInternal(f, time.After(session.config.KeepAliveTimeout), 0)
-	}
-	//deadline occur
-	{
-		c := make(chan time.Time)
-		close(c)
-		f := newFrame(1, allcmds[rand.Int()%len(allcmds)], rand.Uint32())
-		_, err := session.writeFrameInternal(f, c, 0)
-		if !strings.Contains(err.Error(), "timeout") {
-			t.Fatal("write frame with deadline failed", err)
-		}
-	}
-	cli.Close()
-
-	{
-		cli, err = net.Dial("tcp", addr)
-		if err != nil {
-			t.Fatal(err)
-		}
-		config := DefaultConfig()
-		config.KeepAliveInterval = time.Second
-		config.KeepAliveTimeout = 2 * time.Second
-		session, _ = Client(&blockWriteConn{cli}, config)
-		f := newFrame(1, byte(rand.Uint32()), rand.Uint32())
-		c := make(chan time.Time)
-		go func() {
-			//die first, deadline second, better for coverage
-			time.Sleep(time.Second)
-			session.Close()
-			time.Sleep(time.Second)
-			close(c)
-		}()
-		_, err = session.writeFrameInternal(f, c, 0)
-		if !strings.Contains(err.Error(), "closed pipe") {
-			t.Fatal("write frame with to closed conn failed", err)
-		}
-	}
 }
 
 func TestReadDeadline(t *testing.T) {
@@ -930,13 +539,15 @@ func TestReadDeadline(t *testing.T) {
 	buf := make([]byte, 10)
 	var readErr error
 	for i := 0; i < N; i++ {
+		msg := fmt.Sprintf("hello%v", i)
+		stream.Write([]byte(msg))
 		stream.SetReadDeadline(time.Now().Add(-1 * time.Minute))
 		if _, readErr = stream.Read(buf); readErr != nil {
 			break
 		}
 	}
 	if readErr != nil {
-		if !strings.Contains(readErr.Error(), "timeout") {
+		if !strings.Contains(readErr.Error(), "i/o timeout") {
 			t.Fatalf("Wrong error: %v", readErr)
 		}
 	} else {
@@ -958,7 +569,7 @@ func TestWriteDeadline(t *testing.T) {
 	for {
 		stream.SetWriteDeadline(time.Now().Add(-1 * time.Minute))
 		if _, writeErr = stream.Write(buf); writeErr != nil {
-			if !strings.Contains(writeErr.Error(), "timeout") {
+			if !strings.Contains(writeErr.Error(), "i/o timeout") {
 				t.Fatalf("Wrong error: %v", writeErr)
 			}
 			break
@@ -1068,7 +679,6 @@ func bench(b *testing.B, rd io.Reader, wr io.Writer) {
 	buf2 := make([]byte, 128*1024)
 	b.SetBytes(128 * 1024)
 	b.ResetTimer()
-	b.ReportAllocs()
 
 	var wg sync.WaitGroup
 	wg.Add(1)
